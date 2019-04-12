@@ -1,0 +1,204 @@
+#! /usr/bin/env python3
+
+import argparse
+import sys
+from io import StringIO
+from base64 import b64encode, b64decode
+import unittest
+import re
+
+from shutil import copyfile
+
+
+isa = isinstance
+
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "-u",
+    "--unfold",
+    action="store_true",
+    dest="unfold",
+    help="unfold flattened POD comments",
+)
+parser.add_argument(
+    "--selftest", action="store_true", dest="selftest", help="run test suite"
+)
+parser.add_argument(
+    "files", nargs="*"
+)
+args = parser.parse_args()
+
+
+POD_START = re.compile(r"^=pod\b|^=begin\b|^=head1\b|^=item\b")
+
+
+def pod_start(line):
+    return bool(POD_START.match(line))
+
+
+def pod_end(line):
+    return line.rstrip() == "=cut"
+
+
+def magic_comment(line):
+    words = line.split()
+    if len(words) < 2:
+        return False
+    if words[0] == "#" and words[1] == "MAGIC_POD_COMMENT":
+        return True
+    return False
+
+
+def pod_classify(line):
+    r"""
+    >>> pod_classify('')
+    >>> pod_classify('=pod')
+    'START'
+    >>> pod_classify('=cut')
+    'END'
+    """
+    is_start = pod_start(line)
+    is_end = pod_end(line)
+    is_magic_comment = magic_comment(line)
+    hits = sum([is_start, is_end, is_magic_comment])
+    if hits == 0:
+        return None
+    elif hits == 1:
+        if is_start:
+            return "START"
+        elif is_end:
+            return "END"
+        elif is_magic_comment:
+            return "MAGIC_POD_COMMENT"
+        else:
+            raise RuntimeError("couldn't handle line type")
+    else:
+        raise ValueError("line matched more than one pattern: %s" % line)
+
+
+def fold_pod(itr):
+    r"""
+    returns: iterator of lines of file with pod sections
+    organized into base64-encoded magical comments.
+    Note that the lines emitted by this function always have
+    a newline terminator.
+
+    >>> list(fold_pod(['a', 'b']))
+    ['a\n', 'b\n']
+    """
+    if isinstance(itr, (str, bytes)):
+        raise ValueError("expecting iterator of lines, not single line")
+    cur_pod = None
+    for line in itr:
+        line = line if line.endswith("\n") else line + "\n"
+        if None is cur_pod:
+            klass = pod_classify(line)
+            # if we're a start line, start filling pod buffer
+            if klass == "START":
+                cur_pod = StringIO()
+                cur_pod.write(line)
+            # otherwise just emit the line
+            else:
+                yield line
+        else:
+            klass = pod_classify(line)
+            if klass == "END":
+                cur_pod.write(line)
+                b64 = b64encode(cur_pod.getvalue().encode("utf-8"))
+                b64 = b64.decode("utf-8")
+                assert isa(b64, str)
+                content = "# MAGIC_POD_COMMENT : %s\n" % b64
+                cur_pod.close()
+                cur_pod = None
+                yield content
+            else:
+                cur_pod.write(line)
+    # once we're out of the iterator,
+    # read from an incomplete cur_pod buffer a line at a time
+    if cur_pod:
+        for line in cur_pod.getvalue().splitlines(True):
+            yield line
+        cur_pod.close()
+
+
+def fold_pod_(*args, **kwargs):
+    return list(fold_pod(*args, **kwargs))
+
+
+def unfold_pod(itr):
+    if isinstance(itr, (str, bytes)):
+        raise ValueError("expecting iterator of lines, not single line")
+    for line in itr:
+        if pod_classify(line) == "MAGIC_POD_COMMENT":
+            words = line.split()
+            assert len(words) == 4
+            assert words[0] == "#"
+            assert words[1] == "MAGIC_POD_COMMENT"
+            assert words[2] == ":"
+            b64 = words[3]
+            b64 = b64.encode("utf-8")
+            out = b64decode(b64)
+            out = out.decode("utf-8")
+            for l in out.splitlines(True):
+                yield l
+        else:
+            yield line
+
+
+def unfold_pod_(*args, **kwargs):
+    return list(unfold_pod(*args, **kwargs))
+
+
+class TestFoldPod(unittest.TestCase):
+    def test_fold_pod_empty(self):
+        self.assertEqual(fold_pod_([]), [])
+
+    def test_fold_single(self):
+        self.assertEqual(fold_pod_(["a"]), ["a\n"])
+
+    def test_fold_just_begin(self):
+        self.assertEqual(fold_pod_(["=begin"]), ["=begin\n"])
+
+    def test_fold_empty_pod(self):
+        xs = fold_pod_(["=begin", "=cut"])
+        self.assertEqual(len(xs), 1)
+        first = xs[0]
+        words = first.split()
+        self.assertEqual(words[0], "#")
+        self.assertEqual(words[1], "MAGIC_POD_COMMENT")
+
+    def test_fold_unfold_round_trip(self):
+        xs = ["=begin\n", "aaaaa\n", "=cut\n"]
+        rt = unfold_pod_(fold_pod_(xs))
+        self.assertEqual(rt, xs)
+
+
+def main(args, unfold=False, selftest=False):
+    if selftest:
+        return selftest()
+    if args:
+        for path in args:
+            bak = path + ".bak"
+            copyfile(src=path, dst=bak)
+            filt = unfold_pod if unfold else fold_pod
+            with open(bak) as source:
+                with open(path, "w") as sink:
+                    filtered = filt(source)
+                    for line in filt(source):
+                        sink.write(line)
+    else:
+        filt = unfold_pod if unfold else fold_pod
+        source = sys.stdin
+        for line in filt(source):
+            sys.stdout.write(line)
+
+
+def selftest():
+    import doctest
+
+    doctest.testmod()
+    unittest.main()
+
+
+if __name__ == "__main__":
+    main(args.files, selftest=args.selftest, unfold=args.unfold)
