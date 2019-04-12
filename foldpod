@@ -1,5 +1,6 @@
 #! /usr/bin/env python3
 
+
 import argparse
 import sys
 from io import StringIO
@@ -12,7 +13,10 @@ from shutil import copyfile
 
 isa = isinstance
 
-parser = argparse.ArgumentParser()
+parser = argparse.ArgumentParser(prog="foldpod")
+parser.add_argument(
+    "-S", "--selftest", action="store_true", dest="selftest", help="run test suite",
+)
 parser.add_argument(
     "-u",
     "--unfold",
@@ -20,13 +24,10 @@ parser.add_argument(
     dest="unfold",
     help="unfold flattened POD comments",
 )
-parser.add_argument(
-    "--selftest", action="store_true", dest="selftest", help="run test suite"
-)
-parser.add_argument(
-    "files", nargs="*"
-)
-args = parser.parse_args()
+args, files = parser.parse_known_args()
+args_ = vars(args)
+del args
+args = args_
 
 
 POD_START = re.compile(r"^=pod\b|^=begin\b|^=head1\b|^=item\b")
@@ -173,11 +174,11 @@ class TestFoldPod(unittest.TestCase):
         self.assertEqual(rt, xs)
 
 
-def main(args, unfold=False, selftest=False):
+def main(files, unfold=False, selftest=False):
     if selftest:
-        return selftest()
-    if args:
-        for path in args:
+        return do_selftest(files=files)
+    if files:
+        for path in files:
             bak = path + ".bak"
             copyfile(src=path, dst=bak)
             filt = unfold_pod if unfold else fold_pod
@@ -193,12 +194,15 @@ def main(args, unfold=False, selftest=False):
             sys.stdout.write(line)
 
 
-def selftest():
+def do_selftest(files):
     import doctest
 
     doctest.testmod()
-    unittest.main()
+    argv = ["foldpod"] + files
+    unittest.main(argv=argv)
 
 
 if __name__ == "__main__":
-    main(args.files, selftest=args.selftest, unfold=args.unfold)
+    selftest = args["selftest"]
+    unfold = args["unfold"]
+    main(files=files, selftest=selftest, unfold=unfold)
